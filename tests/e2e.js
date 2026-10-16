@@ -1,8 +1,11 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const http = require("node:http");
 const path = require("node:path");
 const puppeteer = require("puppeteer-core");
 const { start } = require("../demo/server");
+
+const ARTIFACTS = process.env.FY_ARTIFACTS || "/opt/cursor/artifacts";
 
 function resolveChrome() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
@@ -30,10 +33,77 @@ async function launch(extraArgs, options = {}) {
 }
 
 async function clickFab(page) {
-  await page.evaluate(() => {
+  const visible = await page.evaluate(() => {
     const button = document.querySelector("fy-fab")?.shadowRoot?.querySelector("button");
     if (!button) throw new Error("找不到悬浮按钮");
-    button.click();
+    const rect = button.getBoundingClientRect();
+    return {
+      x: Math.min(window.innerWidth - 2, Math.max(2, rect.left + 8)),
+      y: rect.top + rect.height / 2,
+    };
+  });
+  await page.mouse.move(visible.x, visible.y);
+  await new Promise((resolve) => setTimeout(resolve, 320));
+  const center = await page.evaluate(() => {
+    const button = document.querySelector("fy-fab")?.shadowRoot?.querySelector("button");
+    if (!button) throw new Error("找不到悬浮按钮");
+    const rect = button.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  });
+  await page.mouse.click(center.x, center.y);
+}
+
+function fakeTranslate(text) {
+  return String(text)
+    .split(/(⟪[^⟫]*⟫)/)
+    .map((part) => (part.startsWith("⟪") || !part.trim() ? part : "中文译文"))
+    .join("");
+}
+
+function startMock() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method !== "POST" || url.pathname !== "/v1/chat/completions") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const strings = JSON.parse(body.messages.find((item) => item.role === "user").content);
+      const translations = strings.map(fakeTranslate);
+      requests.push({
+        count: strings.length,
+        model: body.model,
+        responseFormat: body.response_format || null,
+        thinking: body.thinking || null,
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-mock",
+        object: "chat.completion",
+        choices: [{
+          index: 0,
+          finish_reason: "stop",
+          message: { role: "assistant", content: JSON.stringify({ translations }) },
+        }],
+      }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve({ server, requests, port: server.address().port }));
+  });
+}
+
+async function dispatchToggle(worker) {
+  return worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return { ok: false, reason: "no tab" };
+    const response = await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE" });
+    return { ok: true, url: tab.url, response };
   });
 }
 
@@ -190,8 +260,154 @@ async function extensionFlow(articleUrl) {
   }
 }
 
+async function liveExtensionFlow(articleUrl, mock) {
+  fs.mkdirSync(ARTIFACTS, { recursive: true });
+  const shots = {
+    connection: path.join(ARTIFACTS, "screenshot_test_connection.png"),
+    before: path.join(ARTIFACTS, "screenshot_before_translate.png"),
+    after: path.join(ARTIFACTS, "screenshot_after_translate.png"),
+    restored: path.join(ARTIFACTS, "screenshot_restored.png"),
+  };
+  const summary = [];
+  const note = (line) => {
+    summary.push(line);
+    console.log(line);
+  };
+  const browser = await launch(
+    [`--disable-extensions-except=${ROOT}`, `--load-extension=${ROOT}`],
+    { headless: false, ignoreDefaultArgs: ["--disable-extensions"] },
+  );
+  try {
+    const target = await browser.waitForTarget(
+      (item) => item.type() === "service_worker" && item.url().includes("background.js"),
+      { timeout: 15000 },
+    );
+    const worker = await target.worker();
+    const extensionId = new URL(target.url()).host;
+    const options = await browser.newPage();
+    await options.setViewport({ width: 1100, height: 900 });
+    await options.goto(`chrome-extension://${extensionId}/src/options.html`, { waitUntil: "networkidle0" });
+    await options.waitForFunction(() => document.querySelector("#model").value === "deepseek-flash");
+    await options.$eval("#apiKey", (el) => {
+      el.value = "sk-live-test";
+    });
+    await options.$eval("#model", (el) => {
+      el.value = "mock-translator";
+    });
+    await options.$eval("#baseUrl", (el, value) => {
+      el.value = value;
+    }, `http://127.0.0.1:${mock.port}/v1`);
+    await options.$eval("#demoMode", (el) => {
+      el.checked = false;
+    });
+    await options.click("#test");
+    await options.waitForFunction(() => {
+      const text = document.querySelector("#status")?.textContent || "";
+      return text.includes("接口返回") || text.includes("失败") || text.includes("错误");
+    }, { timeout: 15000 });
+    const status = await options.$eval("#status", (el) => ({ text: el.textContent, className: el.className }));
+    assert.equal(status.className, "ok");
+    assert.match(status.text, /接口返回/);
+    assert.doesNotMatch(status.text, /演示模式/);
+    assert.match(status.text, /Claude/);
+    assert.match(status.text, /Agent/);
+    assert.doesNotMatch(status.text, /克劳德|代理/);
+    await options.$eval("#status", (el) => el.scrollIntoView({ block: "center" }));
+    await options.screenshot({ path: shots.connection });
+    note(`test connection ok: ${status.text}`);
+    assert.equal(mock.requests.length, 1);
+    assert.equal(mock.requests[0].count, 1);
+    assert.equal(mock.requests[0].thinking, null);
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.goto(articleUrl, { waitUntil: "networkidle0" });
+    await page.waitForSelector("fy-fab");
+    assert.equal(await page.$("fy-trans"), null);
+    await page.screenshot({ path: shots.before, fullPage: true });
+    note("before: no fy-trans");
+
+    await clickFab(page);
+    await page.waitForFunction(
+      () => document.querySelector("fy-fab")?.getAttribute("data-mode") === "translated",
+      { timeout: 15000 },
+    );
+    const translated = await page.evaluate(() => {
+      const h1 = document.querySelector("h1");
+      const trans = h1.querySelector("fy-trans");
+      const body = trans?.shadowRoot?.querySelector(".body");
+      const h1Box = h1.getBoundingClientRect();
+      const transBox = trans.getBoundingClientRect();
+      const all = [...document.querySelectorAll("fy-trans")].map((node) => node.shadowRoot.querySelector(".body")?.textContent || "");
+      return {
+        count: all.length,
+        original: h1.childNodes[0].textContent,
+        text: body?.textContent || "",
+        below: transBox.top > h1Box.top + 8,
+        preCount: document.querySelectorAll("pre fy-trans").length,
+        joined: all.join("\n"),
+      };
+    });
+    assert.ok(translated.count >= 18, `译文段数过少: ${translated.count}`);
+    assert.equal(translated.original, "Claude Agents on Kubernetes");
+    assert.match(translated.text, /中文译文/);
+    assert.match(translated.text, /Claude/);
+    assert.match(translated.text, /Agent/);
+    assert.match(translated.text, /Kubernetes/);
+    assert.doesNotMatch(translated.joined, /克劳德|代理/);
+    assert.equal(translated.below, true);
+    assert.equal(translated.preCount, 0);
+    await page.screenshot({ path: shots.after, fullPage: true });
+    note(`fab mouse click translated ${translated.count} blocks; h1=${translated.text}`);
+
+    await clickFab(page);
+    await page.waitForFunction(() => !document.querySelector("fy-trans"), { timeout: 8000 });
+    const restored = await page.evaluate(() => ({
+      title: document.querySelector("h1").textContent,
+      mode: document.querySelector("fy-fab").getAttribute("data-mode"),
+    }));
+    assert.equal(restored.title, "Claude Agents on Kubernetes");
+    assert.equal(restored.mode, "idle");
+    await page.screenshot({ path: shots.restored, fullPage: true });
+    note("fab second click restored");
+
+    await page.bringToFront();
+    const commands = await worker.evaluate(() => chrome.commands.getAll());
+    note(`commands: ${JSON.stringify(commands)}`);
+    const toolbar = await dispatchToggle(worker);
+    assert.equal(toolbar.ok, true);
+    await page.waitForFunction(
+      () => document.querySelector("fy-fab")?.getAttribute("data-mode") === "translated",
+      { timeout: 15000 },
+    );
+    const viaAction = await page.evaluate(() => document.querySelector("h1 fy-trans")?.shadowRoot?.querySelector(".body")?.textContent || "");
+    assert.match(viaAction, /中文译文/);
+    assert.match(viaAction, /Claude/);
+    note(`toolbar/action dispatchToggle translated: ${viaAction}`);
+    await dispatchToggle(worker);
+    await page.waitForFunction(() => !document.querySelector("fy-trans"), { timeout: 8000 });
+
+    const command = await dispatchToggle(worker);
+    assert.equal(command.ok, true);
+    await page.waitForFunction(
+      () => document.querySelector("fy-fab")?.getAttribute("data-mode") === "translated",
+      { timeout: 15000 },
+    );
+    const viaCommand = await page.evaluate(() => document.querySelectorAll("fy-trans").length);
+    assert.ok(viaCommand >= 18);
+    note(`command dispatchToggle translated ${viaCommand} blocks`);
+    await dispatchToggle(worker);
+    await page.waitForFunction(() => !document.querySelector("fy-trans"));
+    note(`mock requests: ${JSON.stringify(mock.requests.map((item) => ({ count: item.count, model: item.model, responseFormat: item.responseFormat, thinking: item.thinking })))}`);
+    fs.writeFileSync(path.join(ARTIFACTS, "e2e_live_summary.txt"), `${summary.join("\n")}\n`);
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   const server = await start(0);
+  const mock = await startMock();
   const port = server.address().port;
   const shots = {
     before: "/tmp/fy-before.png",
@@ -204,8 +420,11 @@ async function main() {
     console.log("preview ok");
     await extensionFlow(`http://127.0.0.1:${port}/`);
     console.log("extension ok");
+    await liveExtensionFlow(`http://127.0.0.1:${port}/`, mock);
+    console.log("live ok");
   } finally {
     server.close();
+    mock.server.close();
   }
 }
 
