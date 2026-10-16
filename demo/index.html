@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Agents on Kubernetes</title>
+    <link rel="stylesheet" href="/demo/article.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">Field Notes</div>
+      <nav aria-label="Sections">
+        <ul>
+          <li><a href="#why">Why Agent</a></li>
+          <li><a href="#cluster">Cluster</a></li>
+          <li><a href="#tools">Tools</a></li>
+        </ul>
+      </nav>
+    </header>
+    <main>
+      <article>
+        <p class="kicker">Engineering notes</p>
+        <h1>Claude Agents on Kubernetes</h1>
+        <p class="lede">A field guide to running Claude Agents with RAG, MCP, and a sane Context window.</p>
+
+        <h2 id="why">Why the Agent keeps its name</h2>
+        <p>Claude is an Agent, not a metaphor. Treat Agent, Prompt, and Token as technical terms. An LLM should not rename them.</p>
+
+        <h2 id="cluster">Wire it to the cluster</h2>
+        <p>The service runs on Kubernetes. Package the runtime with Docker, call the API through the official SDK, and keep the CLI nearby for debugging.</p>
+        <p>Apply it with <code>kubectl apply -f agent.yaml</code> and wait for the cluster.</p>
+        <pre><code>kubectl apply -f agent.yaml
+kubectl get pods</code></pre>
+        <p>The container image is published to GitHub. Engineers review it in Cursor, sometimes with GitHub Copilot open beside the editor.</p>
+
+        <h2>Retrieval and tools</h2>
+        <p>RAG pulls passages into the Context window before the model answers. MCP lets the Agent call tools without stuffing every schema into the Prompt.</p>
+        <p>Embeddings are stored beside the corpus. Fine-tuning is optional; start with a strong Prompt and a measured Token budget.</p>
+
+        <h2 id="tools">The toolchain</h2>
+        <p>Read the Transformer paper when the result surprises you. DeepSeek, GPT, and Claude can sit in the same paragraph, and none of them should be transliterated.</p>
+        <ul>
+          <li>Keep API keys out of the image.</li>
+          <li>Pin the SDK version.</li>
+          <li>Watch Token spikes when the Context window fills up.</li>
+        </ul>
+      </article>
+      <form class="search">
+        <label>Filter articles <input type="search" value="Claude Agent" /></label>
+        <textarea>Notes about Claude Agent</textarea>
+      </form>
+    </main>
+    <script>
+      window.__skipped = "Claude Agent should stay inside this script";
+    </script>
+  </body>
+</html>

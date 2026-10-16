@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "整页一键翻译",
+  "version": "1.0.0",
+  "description": "一键把当前网页变成双语对照，并保护 Claude、Agent 等 IT / AI 术语不被误译。",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "整页一键翻译",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "toggle-translate": {
+      "suggested_key": {
+        "default": "Alt+Shift+T",
+        "mac": "Alt+Shift+T"
+      },
+      "description": "翻译或还原当前页面"
+    }
+  },
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "src/lib/terms.js",
+        "src/lib/sites.js",
+        "src/lib/settings.js",
+        "src/lib/glossary.js",
+        "src/lib/batch.js",
+        "src/lib/mock.js",
+        "src/lib/api.js",
+        "src/lib/dom.js",
+        "src/lib/ui.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
