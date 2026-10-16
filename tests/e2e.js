@@ -158,7 +158,7 @@ async function extensionFlow(articleUrl) {
     const extensionId = new URL(target.url()).host;
     const options = await browser.newPage();
     await options.goto(`chrome-extension://${extensionId}/src/options.html`, { waitUntil: "networkidle0" });
-    await options.waitForFunction(() => document.querySelector("#model").value === "deepseek-chat");
+    await options.waitForFunction(() => document.querySelector("#model").value === "deepseek-flash");
     await options.click("#demoMode");
     await options.click("#save");
     await options.waitForFunction(() => document.querySelector("#status").textContent.includes("已保存"));

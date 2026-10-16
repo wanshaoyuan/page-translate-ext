@@ -7,8 +7,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const DEFAULT_BASE_URL = "https://api.deepseek.com";
-  const DEFAULT_MODEL = "deepseek-chat";
+  const DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
+  const DEFAULT_MODEL = "deepseek-flash";
+  const LEGACY_MODEL = "deepseek-chat";
   const DEFAULT_LANGUAGE = "简体中文";
   const LANGUAGES = ["简体中文", "繁體中文", "English", "日本語", "한국어", "Français", "Deutsch", "Español"];
 
@@ -31,12 +32,30 @@
     return String(hash);
   }
 
+  function isLegacyDeepSeekRoot(value) {
+    try {
+      const url = new URL(value);
+      const path = url.pathname.replace(/\/+$/, "");
+      return url.protocol === "https:"
+        && url.hostname.toLowerCase() === "api.deepseek.com"
+        && path === ""
+        && url.search === ""
+        && url.hash === ""
+        && url.username === ""
+        && url.password === "";
+    } catch {
+      return false;
+    }
+  }
+
   function normalizeSettings(stored) {
     const input = stored || {};
     const PT = root.PT || {};
-    const model = String(input.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-    let baseUrl = String(input.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+    let model = String(input.model || "").trim();
+    if (!model || model === LEGACY_MODEL) model = DEFAULT_MODEL;
+    let baseUrl = String(input.baseUrl || "").trim() || DEFAULT_BASE_URL;
     baseUrl = baseUrl.replace(/\/+$/, "");
+    if (isLegacyDeepSeekRoot(baseUrl)) baseUrl = DEFAULT_BASE_URL;
     const terms = Array.isArray(input.terms)
       ? PT.dedupeTerms(input.terms)
       : (PT.DEFAULT_TERMS || []).slice();
