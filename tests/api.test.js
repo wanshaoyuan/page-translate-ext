@@ -11,9 +11,13 @@ require("../src/lib/api.js");
 
 const { DEFAULT_TERMS } = require("../src/lib/terms.js");
 const { normalizeSettings } = require("../src/lib/settings.js");
+const fs = require("node:fs");
+const path = require("node:path");
+
 const {
   MESSAGES,
   TranslateError,
+  describeError,
   chatCompletionsUrl,
   buildSystemPrompt,
   translateTexts,
@@ -33,13 +37,31 @@ function settings(extra) {
   return normalizeSettings({ apiKey: "sk-test-key", terms: ["Claude", "Agent", "Prompt", "Token"], ...extra });
 }
 
-test("补全 DeepSeek 的 chat completions 地址", () => {
-  assert.equal(chatCompletionsUrl("https://api.deepseek.com"), "https://api.deepseek.com/chat/completions");
-  assert.equal(chatCompletionsUrl("https://api.deepseek.com/"), "https://api.deepseek.com/chat/completions");
+test("补全 chat completions 地址，DeepSeek 根域名补 /v1 且不重复", () => {
+  assert.equal(chatCompletionsUrl("https://api.deepseek.com"), "https://api.deepseek.com/v1/chat/completions");
+  assert.equal(chatCompletionsUrl("https://api.deepseek.com/"), "https://api.deepseek.com/v1/chat/completions");
   assert.equal(chatCompletionsUrl("https://api.deepseek.com/v1"), "https://api.deepseek.com/v1/chat/completions");
+  assert.equal(chatCompletionsUrl("https://api.deepseek.com/v1/"), "https://api.deepseek.com/v1/chat/completions");
+  assert.equal(
+    chatCompletionsUrl("https://api.deepseek.com/v1/chat/completions"),
+    "https://api.deepseek.com/v1/chat/completions",
+  );
+  assert.equal(
+    chatCompletionsUrl("https://api.deepseek.com/chat/completions"),
+    "https://api.deepseek.com/chat/completions",
+  );
+  assert.equal(chatCompletionsUrl("https://example.com"), "https://example.com/chat/completions");
+  assert.equal(chatCompletionsUrl("https://example.com/"), "https://example.com/chat/completions");
+  assert.equal(chatCompletionsUrl("https://example.com/v1"), "https://example.com/v1/chat/completions");
+  assert.equal(chatCompletionsUrl("https://example.com/v1/"), "https://example.com/v1/chat/completions");
+  assert.equal(chatCompletionsUrl("https://example.com/openai/v1"), "https://example.com/openai/v1/chat/completions");
   assert.equal(
     chatCompletionsUrl("https://example.com/v1/chat/completions"),
     "https://example.com/v1/chat/completions",
+  );
+  assert.equal(
+    chatCompletionsUrl("https://example.com/proxy/chat/completions"),
+    "https://example.com/proxy/chat/completions",
   );
 });
 
@@ -91,9 +113,10 @@ test("模型若把占位符译掉，最终仍还原术语", async () => {
       nonce: "ab",
       fetchImpl: async (_url, init) => {
         const body = JSON.parse(init.body);
-        assert.equal(body.model, "deepseek-chat");
+        assert.equal(body.model, "deepseek-flash");
+        assert.deepEqual(body.thinking, { type: "disabled" });
         assert.equal(init.headers.Authorization, "Bearer sk-test-key");
-        assert.equal(_url, "https://api.deepseek.com/chat/completions");
+        assert.equal(_url, "https://api.deepseek.com/v1/chat/completions");
         const input = JSON.parse(body.messages[1].content);
         const translations = input.map((text) =>
           text
@@ -138,6 +161,19 @@ test("HTTP 401、429、网络错误和条数不一致都有中文说明", async 
   const auth = await fail(async () => jsonResponse({ error: { message: "invalid" } }, 401));
   assert.equal(auth.code, "AUTH");
   assert.match(auth.message, /API Key/);
+  assert.doesNotMatch(auth.message, /网络/);
+
+  const forbidden = await fail(async () => jsonResponse({ error: { message: "forbidden" } }, 403));
+  assert.equal(forbidden.code, "AUTH");
+  assert.match(forbidden.message, /API Key/);
+  assert.doesNotMatch(forbidden.message, /网络/);
+
+  const thrownAuth = Object.assign(new TypeError("unauthorized"), { status: 401 });
+  const authThrow = await fail(async () => {
+    throw thrownAuth;
+  });
+  assert.equal(authThrow.code, "AUTH");
+  assert.doesNotMatch(authThrow.message, /网络/);
 
   let attempts = 0;
   const limited = await fail(async () => {
@@ -149,10 +185,13 @@ test("HTTP 401、429、网络错误和条数不一致都有中文说明", async 
   assert.equal(attempts, 1);
 
   const network = await fail(async () => {
-    throw new TypeError("Failed to fetch");
+    throw new TypeError("Failed to fetch sk-test-key");
   });
   assert.equal(network.code, "NETWORK");
   assert.match(network.message, /网络/);
+  assert.match(network.message, /TypeError: Failed to fetch/);
+  assert.match(network.message, /\*\*\*/);
+  assert.doesNotMatch(network.message, /sk-test-key/);
 
   const mismatch = await fail(async () =>
     jsonResponse({ choices: [{ message: { content: JSON.stringify({ translations: ["only one", "extra"] }) } }] }),
@@ -183,6 +222,7 @@ test("429 会重试一次，response_format 不被支持时去掉再请求", asy
       calls += 1;
       const body = JSON.parse(init.body);
       assert.equal(body.model, "deepseek-reasoner");
+      assert.deepEqual(body.thinking, { type: "disabled" });
       if (body.response_format) return jsonResponse({ error: { message: "unsupported" } }, 400);
       const input = JSON.parse(body.messages[1].content);
       return jsonResponse({
@@ -191,6 +231,90 @@ test("429 会重试一次，response_format 不被支持时去掉再请求", asy
     },
   });
   assert.equal(calls, 2);
+});
+
+test("自定义网关不附带 thinking，也不会自动插入 /v1", async () => {
+  await translateTexts([{ id: "a", text: "Hello Claude today" }], settings({ baseUrl: "https://gateway.example/openai/v1", model: "local-model" }), {
+    nonce: "ab",
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      assert.equal(url, "https://gateway.example/openai/v1/chat/completions");
+      assert.equal(body.model, "local-model");
+      assert.equal("thinking" in body, false);
+      const input = JSON.parse(body.messages[1].content);
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ translations: input }) } }],
+      });
+    },
+  });
+});
+
+test("不调用 AbortSignal.timeout / any，超时和取消都不会被当成网络错误", async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const originalAny = AbortSignal.any;
+  AbortSignal.timeout = () => {
+    throw new TypeError("AbortSignal.timeout is not a function");
+  };
+  AbortSignal.any = () => {
+    throw new TypeError("AbortSignal.any is not a function");
+  };
+  try {
+    const [item] = await translateTexts([{ id: "a", text: "Hello Claude today" }], settings(), {
+      nonce: "ab",
+      fetchImpl: async (_url, init) => {
+        assert.ok(init.signal instanceof AbortSignal);
+        assert.equal(init.signal.aborted, false);
+        return jsonResponse({
+          choices: [{ message: { content: JSON.stringify({ translations: ["你好 Claude today"] }) } }],
+        });
+      },
+    });
+    assert.match(item.text, /Claude/);
+
+    const timedOut = await (async () => {
+      try {
+        await translateTexts([{ id: "a", text: "Hello Claude today" }], settings(), {
+          nonce: "ab",
+          timeoutMs: 20,
+          fetchImpl: (_url, init) =>
+            new Promise((resolve, reject) => {
+              const abort = () => {
+                const error = new Error("The operation was aborted");
+                error.name = "AbortError";
+                reject(error);
+              };
+              if (init.signal?.aborted) abort();
+              else init.signal?.addEventListener("abort", abort, { once: true });
+            }),
+        });
+      } catch (error) {
+        return error;
+      }
+      assert.fail("应该超时");
+    })();
+    assert.equal(timedOut.code, "TIMEOUT");
+    assert.doesNotMatch(timedOut.message, /网络/);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+    AbortSignal.any = originalAny;
+  }
+});
+
+test("未分类错误也会带上 name 和 message，并抹掉 Key", () => {
+  const error = new TypeError("socket hang up Bearer sk-live");
+  assert.equal(describeError(error, "sk-live"), "TypeError: socket hang up Bearer ***");
+  assert.equal(describeError(new TranslateError("AUTH", MESSAGES.AUTH), "sk-live"), MESSAGES.AUTH);
+});
+
+test("测试连接只在 background service worker 里发请求", () => {
+  const options = fs.readFileSync(path.join(__dirname, "../src/options.js"), "utf8");
+  const background = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  assert.match(options, /TEST_CONNECTION/);
+  assert.match(options, /service worker/);
+  assert.doesNotMatch(options, /\bfetch\s*\(/);
+  assert.match(background, /TEST_CONNECTION/);
+  assert.match(background, /service worker/);
+  assert.match(background, /translateTexts/);
 });
 
 test("取消翻译不会当成网络错误", async () => {

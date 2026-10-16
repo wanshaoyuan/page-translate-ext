@@ -20,13 +20,19 @@
 | 项 | 默认 |
 | --- | --- |
 | API Key | 空。没有 Key 时会提示去设置页填写 |
-| 模型 | `deepseek-chat` |
-| Base URL | `https://api.deepseek.com` |
+| 模型 | `deepseek-flash` |
+| Base URL | `https://api.deepseek.com/v1` |
 | 目标语言 | 简体中文 |
 
-Key、模型和地址都存在 `chrome.storage.local`，只留在本机。点「保存并测试连接」会用一句带 Claude、Agent 的话打一次接口，方便确认 Key 和术语保护是否生效。
+`deepseek-chat` 已于 2026-07-24 退役。升级后，如果本机还存着旧默认值 `deepseek-chat` 或 `https://api.deepseek.com`（没有 `/v1`），打开设置或翻译时会自动改成上表的新默认。自己填过的模型和网关地址不会被改掉。
 
-如果接口前面还有一层兼容网关，把 Base URL 改成网关地址即可。末尾的 `/` 可以省略；填到 `/v1` 也可以，扩展会请求 `{Base URL}/chat/completions`。
+Key、模型和地址都存在 `chrome.storage.local`，只留在本机。点「保存并测试连接」会用一句带 Claude、Agent 的话打一次接口，方便确认 Key 和术语保护是否生效。这次请求由扩展的后台 service worker 发出（选项页不直连，避免 CORS）。
+
+官方文档里的 OpenAI 兼容 `base_url` 可以是 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1`，curl 示例是 `https://api.deepseek.com/chat/completions`。扩展默认用带 `/v1` 的地址。对 `api.deepseek.com` 的根域名会自动请求 `/v1/chat/completions`；已经写了 `/v1` 时不会再拼成 `/v1/v1`。发往官方域名的翻译请求会带上 `thinking: { type: "disabled" }`，避免默认思考模式又慢又贵。
+
+如果接口前面还有一层兼容网关，把 Base URL 改成网关地址即可。末尾的 `/` 可以省略；已经包含 `/v1` 或 `/chat/completions` 时不会重复拼接。自定义网关不会附带 `thinking` 字段。
+
+DeepSeek 文档没有单独的中国大陆备用域名，不要填写 `api.deepseeki.com` 这类非官方地址。官方只有 `https://api.deepseek.com`（OpenAI 兼容）和 `https://api.deepseek.com/anthropic`（Anthropic 兼容，本扩展不用后者）。如果官方域名不通——公司防火墙、证书吊销检查或 DNS 问题都可能让请求直接失败——把 Base URL 换成你自己的 OpenAI 兼容反代或网关。测试失败时，提示里会带上底层原因，例如 `（TypeError: Failed to fetch）`，API Key 会被抹掉。`401` / `403` 会提示 Key 无效，而不会显示成网络错误。
 
 ## 怎么翻译
 
@@ -92,7 +98,8 @@ npm test
 - 长文分批、占位符不被从中切断、并发上限
 - 跳过 `pre` / `script` / `textarea` / 隐藏节点
 - 译文插入后原文还在，清除后页面回到原样
-- 缺 Key、401、429、网络失败时的中文错误
+- 缺 Key、401、403、429、网络失败时的中文错误（网络错误会带上底层 `error.name: error.message`）
+- Base URL 拼接、旧默认 `https://api.deepseek.com` / `deepseek-chat` 的迁移
 
 `npm run e2e` 会打开示例页，检查双语位置、术语、代码块、拖动和悬停，并加载扩展走一遍「演示模式 → 翻译 → 角标 → 还原」。官方 Chrome 137 起不再接受命令行 `--load-extension`，扩展这段需要 Chrome for Testing。脚本会优先用 `CHROME_PATH`，否则在本机已安装的 Chrome for Testing 里找。
 

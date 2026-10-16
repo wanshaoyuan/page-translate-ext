@@ -34,10 +34,43 @@
     return out;
   }
 
+  function isOfficialDeepSeek(baseUrl) {
+    try {
+      return new URL(String(baseUrl || "").trim()).hostname.toLowerCase() === "api.deepseek.com";
+    } catch {
+      return false;
+    }
+  }
+
+  // 末尾 / 可省略。已经写到 /chat/completions 就原样使用。
+  // api.deepseek.com 的根路径自动补 /v1，已是 /v1 时不再拼成 /v1/v1。
+  // 自定义网关只补 /chat/completions，不擅自插入 /v1。
   function chatCompletionsUrl(baseUrl) {
-    const base = String(baseUrl || "").trim().replace(/\/+$/, "");
-    if (/\/chat\/completions$/i.test(base)) return base;
-    return `${base}/chat/completions`;
+    const raw = String(baseUrl || "").trim();
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      const base = raw.replace(/\/+$/, "");
+      if (/\/chat\/completions$/i.test(base)) return base;
+      return `${base}/chat/completions`;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      const base = raw.replace(/\/+$/, "");
+      if (/\/chat\/completions$/i.test(base)) return base;
+      return `${base}/chat/completions`;
+    }
+    const path = url.pathname.replace(/\/+$/, "");
+    if (/\/chat\/completions$/i.test(path)) {
+      url.pathname = path;
+      return url.toString();
+    }
+    if (url.hostname.toLowerCase() === "api.deepseek.com" && path === "") {
+      url.pathname = "/v1/chat/completions";
+      return url.toString();
+    }
+    url.pathname = `${path}/chat/completions`;
+    return url.toString();
   }
 
   function assertHttpUrl(baseUrl) {
@@ -118,7 +151,39 @@
   }
 
   function isAbortError(error) {
-    return error?.name === "AbortError" || error?.code === 20;
+    return error?.name === "AbortError" || error?.name === "TimeoutError" || error?.code === 20;
+  }
+
+  function errorName(error) {
+    if (error && typeof error === "object" && error.name) return String(error.name);
+    return "Error";
+  }
+
+  function errorText(error) {
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object" && typeof error.message === "string") return error.message;
+    return "";
+  }
+
+  function describeError(error, secret) {
+    if (error?.userMessage) return scrub(error.userMessage, secret);
+    const name = errorName(error);
+    const message = errorText(error);
+    return scrub(message ? `${name}: ${message}` : name, secret);
+  }
+
+  function thrownAuthStatus(error) {
+    const candidates = [error?.status, error?.statusCode, error?.response?.status];
+    for (const value of candidates) {
+      const status = Number(value);
+      if (status === 401 || status === 403) return status;
+    }
+    return 0;
+  }
+
+  function networkMessage(error, secret) {
+    const detail = describeError(error, secret).replace(/\s+/g, " ").trim().slice(0, 240);
+    return detail ? `${MESSAGES.NETWORK}（${detail}）` : MESSAGES.NETWORK;
   }
 
   async function readBody(response) {
@@ -152,17 +217,58 @@ function retryDelayMs(response) {
     });
   }
 
-  async function fetchWithTimeout(fetchImpl, url, init, signal) {
-    const timeout = AbortSignal.timeout(50000);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  // Chrome 120+ 上 `typeof AbortSignal.timeout === "function"` 且 `AbortSignal.any` 同样存在，
+  // 但扩展 Service Worker 里把它们交给 fetch 时，部分版本会直接抛 TypeError
+  // （name 不是 AbortError，信号也还没 aborted）。以前的 catch 把这类异常改写成
+  // 笼统的「网络错误」，所以 Base URL 改成 https://api.deepseek.com/v1 也看不出原因。
+  // 因此这里做了探测也不调用这两个 API，一律用 AbortController + setTimeout。
+  function linkAbortSignal(userSignal, timeoutMs) {
+    const nativeAbortHelpers = typeof AbortSignal !== "undefined"
+      && typeof AbortSignal.timeout === "function"
+      && typeof AbortSignal.any === "function";
+    if (nativeAbortHelpers) {
+      // 原生 helper 可用也不要走。见上方说明。
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const onUserAbort = () => controller.abort();
+    if (userSignal) {
+      if (userSignal.aborted) onUserAbort();
+      else userSignal.addEventListener("abort", onUserAbort);
+    }
+    return {
+      signal: controller.signal,
+      get timedOut() {
+        return timedOut;
+      },
+      dispose() {
+        clearTimeout(timer);
+        userSignal?.removeEventListener("abort", onUserAbort);
+      },
+    };
+  }
+
+  function resolveTimeoutMs(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return 50000;
+    return number;
+  }
+
+  async function fetchWithTimeout(fetchImpl, url, init, signal, timeoutMs, secret) {
+    const linked = linkAbortSignal(signal, resolveTimeoutMs(timeoutMs));
     try {
-      return await fetchImpl(url, { ...init, signal: combined });
+      return await fetchImpl(url, { ...init, signal: linked.signal });
     } catch (error) {
-      if (isAbortError(error) || signal?.aborted || timeout.aborted) {
-        if (signal?.aborted) throw new TranslateError("CANCELLED", MESSAGES.CANCELLED);
-        throw new TranslateError("TIMEOUT", MESSAGES.TIMEOUT);
-      }
-      throw new TranslateError("NETWORK", MESSAGES.NETWORK);
+      if (signal?.aborted) throw new TranslateError("CANCELLED", MESSAGES.CANCELLED);
+      if (linked.timedOut || isAbortError(error)) throw new TranslateError("TIMEOUT", MESSAGES.TIMEOUT);
+      if (thrownAuthStatus(error)) throw new TranslateError("AUTH", MESSAGES.AUTH);
+      throw new TranslateError("NETWORK", networkMessage(error, secret));
+    } finally {
+      linked.dispose();
     }
   }
 
@@ -171,13 +277,15 @@ function retryDelayMs(response) {
     assertHttpUrl(settings.baseUrl);
     const url = chatCompletionsUrl(settings.baseUrl);
     const payload = {
-      model: settings.model || "deepseek-chat",
+      model: settings.model || "deepseek-flash",
       temperature: 0.1,
       messages: [
         { role: "system", content: buildSystemPrompt(settings.targetLanguage, settings.terms) },
         { role: "user", content: JSON.stringify(strings) },
       ],
     };
+    // 官方域名默认会开思考，翻译又慢又贵。自定义网关不认识这个字段，不要带上。
+    if (isOfficialDeepSeek(settings.baseUrl)) payload.thinking = { type: "disabled" };
     if (options.jsonMode) payload.response_format = { type: "json_object" };
     const response = await fetchWithTimeout(
       deps.fetchImpl,
@@ -191,6 +299,8 @@ function retryDelayMs(response) {
         body: JSON.stringify(payload),
       },
       deps.signal,
+      deps.timeoutMs,
+      settings.apiKey,
     );
     if (response.status === 400 && options.jsonMode) {
       return requestTranslations(strings, settings, deps, { jsonMode: false, allow429Retry: options.allow429Retry });
@@ -305,6 +415,7 @@ function retryDelayMs(response) {
     MESSAGES,
     TranslateError,
     scrub,
+    describeError,
     chatCompletionsUrl,
     buildSystemPrompt,
     parseTranslations,

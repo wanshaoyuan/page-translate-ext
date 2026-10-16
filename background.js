@@ -109,11 +109,13 @@ chrome.runtime.onConnect.addListener((port) => {
           post(port, { type: "CANCELLED" });
           return;
         }
+        const message = PT.describeError(error, settings.apiKey);
+        console.error("[page-translate] translate failed", error?.code || error?.name, message);
         post(port, {
           type: "ERROR",
           error: {
             code: error.code || "UNKNOWN",
-            message: PT.scrub(error.userMessage || error.message || "翻译失败，请稍后重试。", settings.apiKey),
+            message,
           },
         });
       }
@@ -152,26 +154,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function testConnection(override) {
-  const stored = await getSettings();
-  const settings = PT.normalizeSettings({
-    ...stored,
-    ...(override || {}),
-    terms: override?.terms || stored.terms,
-    disabledSites: stored.disabledSitesText,
-    fabTop: stored.fabTop,
-  });
+  // 选项页只 sendMessage。请求必须在有 host_permissions 的 service worker 里发，避免页面 CORS。
+  let settings = { apiKey: "" };
   try {
+    const stored = await getSettings();
+    settings = PT.normalizeSettings({
+      ...stored,
+      ...(override || {}),
+      terms: override?.terms || stored.terms,
+      disabledSites: stored.disabledSitesText,
+      fabTop: stored.fabTop,
+    });
+    const url = PT.chatCompletionsUrl(settings.baseUrl);
+    console.info(
+      "[page-translate] TEST_CONNECTION service worker",
+      PT.scrub(url, settings.apiKey),
+      settings.model,
+      settings.demoMode ? "demo" : "live",
+    );
     const result = await PT.translateTexts([{ id: "test", text: TEST_SENTENCE, codes: [] }], settings, {
       nonce: "test",
       concurrency: 1,
     });
+    console.info("[page-translate] TEST_CONNECTION service worker ok");
     return { ok: true, text: result[0]?.text || "", demoMode: settings.demoMode };
   } catch (error) {
+    const message = PT.describeError(error, settings.apiKey);
+    console.error("[page-translate] TEST_CONNECTION service worker failed", error?.code || error?.name, message);
     return {
       ok: false,
       error: {
         code: error.code || "UNKNOWN",
-        message: PT.scrub(error.userMessage || error.message || "测试失败。", settings.apiKey),
+        message,
       },
     };
   }

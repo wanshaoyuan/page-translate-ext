@@ -167,6 +167,7 @@
     try {
       const saved = await persist();
       if (!saved) return;
+      // 不在选项页里 fetch。后台 service worker 有 host_permissions，由它发 TEST_CONNECTION。
       const result = await chrome.runtime.sendMessage({ type: "TEST_CONNECTION", settings: readForm() });
       if (!result?.ok) {
         setStatus(result?.error?.message || "测试失败。", "bad");
@@ -176,7 +177,9 @@
       const mode = result.demoMode ? "演示模式" : "接口";
       setStatus(`${mode}返回：${result.text}${warning}`, warning ? "bad" : "ok");
     } catch (error) {
-      setStatus(error?.message || "测试失败。", "bad");
+      const name = error?.name || "Error";
+      const message = error?.message || "测试失败。";
+      setStatus(message ? `${name}: ${message}` : name, "bad");
     } finally {
       button.disabled = false;
     }
