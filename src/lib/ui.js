@@ -239,20 +239,35 @@
       return clampTop(center / height, height);
     }
 
+    let pointerId = null;
+    let captured = false;
+
+    // 按下就 setPointerCapture，Chrome 会吞掉随后的 click，按钮看起来点了但翻译不会开始。
+    // 只有真正拖动时才捕获指针；原地点击仍交给 button 的 click。
     slot.addEventListener("pointerdown", (event) => {
       if (event.button != null && event.button !== 0) return;
       dragging = true;
       moved = false;
+      captured = false;
+      pointerId = event.pointerId;
       startY = event.clientY;
       const rect = host.getBoundingClientRect();
       startCenter = rect.height ? rect.top + rect.height / 2 : 0;
-      host.setAttribute("data-dragging", "1");
-      slot.setPointerCapture?.(event.pointerId);
     });
     slot.addEventListener("pointermove", (event) => {
-      if (!dragging) return;
+      if (!dragging || event.pointerId !== pointerId) return;
       const dy = event.clientY - startY;
-      if (Math.abs(dy) > 4) moved = true;
+      if (!moved) {
+        if (Math.abs(dy) <= 4) return;
+        moved = true;
+        host.setAttribute("data-dragging", "1");
+        try {
+          slot.setPointerCapture?.(event.pointerId);
+          captured = true;
+        } catch {
+          captured = false;
+        }
+      }
       const view = doc.defaultView;
       const height = view?.innerHeight || 800;
       const ratio = clampTop((startCenter + dy) / height, height);
@@ -260,13 +275,18 @@
     });
     function endDrag(event) {
       if (!dragging) return;
+      if (pointerId != null && event.pointerId != null && event.pointerId !== pointerId) return;
       dragging = false;
+      pointerId = null;
       host.removeAttribute("data-dragging");
-      try {
-        slot.releasePointerCapture?.(event.pointerId);
-      } catch {
-        /* 捕获可能已经释放。 */
+      if (captured) {
+        try {
+          slot.releasePointerCapture?.(event.pointerId);
+        } catch {
+          /* 捕获可能已经释放。 */
+        }
       }
+      captured = false;
       if (moved) {
         suppressClick = true;
         if (options?.onTopChange) options.onTopChange(currentRatio());
