@@ -259,6 +259,9 @@ function retryDelayMs(response) {
   }
 
   async function fetchWithTimeout(fetchImpl, url, init, signal, timeoutMs, secret) {
+    if (typeof fetchImpl !== "function") {
+      throw new TranslateError("BAD_RESPONSE", "内部错误：缺少 fetch");
+    }
     const linked = linkAbortSignal(signal, resolveTimeoutMs(timeoutMs));
     try {
       return await fetchImpl(url, { ...init, signal: linked.signal });
@@ -287,8 +290,12 @@ function retryDelayMs(response) {
     // 官方域名默认会开思考，翻译又慢又贵。自定义网关不认识这个字段，不要带上。
     if (isOfficialDeepSeek(settings.baseUrl)) payload.thinking = { type: "disabled" };
     if (options.jsonMode) payload.response_format = { type: "json_object" };
+    const fetchImpl = deps.fetchImpl || globalThis.fetch;
+    if (typeof fetchImpl !== "function") {
+      throw new TranslateError("BAD_RESPONSE", "内部错误：缺少 fetch");
+    }
     const response = await fetchWithTimeout(
-      deps.fetchImpl,
+      fetchImpl,
       url,
       {
         method: "POST",

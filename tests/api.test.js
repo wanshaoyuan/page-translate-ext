@@ -315,6 +315,78 @@ test("测试连接只在 background service worker 里发请求", () => {
   assert.match(background, /TEST_CONNECTION/);
   assert.match(background, /service worker/);
   assert.match(background, /translateTexts/);
+  assert.equal((background.match(/fetchImpl:\s*fetch\b/g) || []).length, 2);
+});
+
+test("不传 fetchImpl 时落到全局 fetch，模拟测试连接不再出现 fetchImpl is not a function", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls += 1;
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    assert.equal(init.headers.Authorization, "Bearer sk-test-key");
+    return jsonResponse({
+      choices: [{ message: { content: JSON.stringify({ translations: ["你好，Claude Agent。"] }) } }],
+    });
+  };
+  try {
+    const result = await translateTexts([{ id: "test", text: "Hello, Claude Agent.", codes: [] }], settings(), {
+      nonce: "test",
+      concurrency: 1,
+    });
+    assert.equal(calls, 1);
+    assert.match(result[0].text, /Claude/);
+    assert.match(result[0].text, /Agent/);
+    assert.doesNotMatch(result[0].text, /fetchImpl is not a function/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("传入自定义 fetchImpl 时优先使用自定义实现", async () => {
+  const original = globalThis.fetch;
+  let globalCalls = 0;
+  let customCalls = 0;
+  globalThis.fetch = async () => {
+    globalCalls += 1;
+    throw new Error("should not use global fetch");
+  };
+  try {
+    const [item] = await translateTexts([{ id: "a", text: "Hello Claude today" }], settings(), {
+      nonce: "ab",
+      fetchImpl: async () => {
+        customCalls += 1;
+        return jsonResponse({
+          choices: [{ message: { content: JSON.stringify({ translations: ["你好 Claude today"] }) } }],
+        });
+      },
+    });
+    assert.equal(customCalls, 1);
+    assert.equal(globalCalls, 0);
+    assert.match(item.text, /Claude/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchImpl 和全局 fetch 都不是函数时抛出明确错误", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = undefined;
+  try {
+    await assert.rejects(
+      () => translateTexts([{ id: "test", text: "Hello, Claude Agent.", codes: [] }], settings(), {
+        nonce: "test",
+        concurrency: 1,
+      }),
+      (error) => {
+        assert.equal(error.message, "内部错误：缺少 fetch");
+        assert.doesNotMatch(String(error.message), /fetchImpl is not a function/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
 });
 
 test("取消翻译不会当成网络错误", async () => {

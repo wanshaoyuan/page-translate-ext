@@ -95,6 +95,7 @@ chrome.runtime.onConnect.addListener((port) => {
         await PT.translateTexts(msg.items || [], settings, {
           nonce: msg.nonce,
           signal,
+          fetchImpl: fetch,
           onUnit(unit) {
             post(port, { type: "UNIT", unit });
           },
@@ -175,6 +176,7 @@ async function testConnection(override) {
     const result = await PT.translateTexts([{ id: "test", text: TEST_SENTENCE, codes: [] }], settings, {
       nonce: "test",
       concurrency: 1,
+      fetchImpl: fetch,
     });
     console.info("[page-translate] TEST_CONNECTION service worker ok");
     return { ok: true, text: result[0]?.text || "", demoMode: settings.demoMode };
